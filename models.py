@@ -90,8 +90,9 @@ class TextEncoder(nn.Module):
 
     def forward(self, x, x_lengths, bert):
         x = self.emb(x) * math.sqrt(self.hidden_channels)  # [b, t, h]
-        b = self.emb_bert(bert)
-        x = x + b
+        if bert is not None:
+            b = self.emb_bert(bert)
+            x = x + b
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
@@ -728,7 +729,7 @@ class SyntStudentTrn(nn.Module):
 
         logw = self.dp(x, x_mask, g=g)
         w = torch.exp(logw) * x_mask * length_scale
-        w_ceil = torch.ceil(w)
+        w_ceil = torch.ceil(w + 0.5)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
             x_mask.dtype
@@ -832,7 +833,7 @@ class SynthesizerEval(nn.Module):
         self.dec.remove_weight_norm()
         self.flow.remove_weight_norm()
 
-    def infer(self, x, x_lengths, bert, sid=None, noise_scale=1, length_scale=1, max_len=None):
+    def infer(self, x, x_lengths, bert=None, sid=None, noise_scale=1, length_scale=1, max_len=None):
         x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, bert)
         if self.n_speakers > 0:
             g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
@@ -841,7 +842,7 @@ class SynthesizerEval(nn.Module):
 
         logw = self.dp(x, x_mask, g=g)
         w = torch.exp(logw) * x_mask * length_scale
-        w_ceil = torch.ceil(w)
+        w_ceil = torch.ceil(w + 0.35)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
             x_mask.dtype
@@ -870,7 +871,7 @@ class SynthesizerEval(nn.Module):
 
         logw = self.dp(x, x_mask, g=g)
         w = torch.exp(logw) * x_mask * length_scale
-        w_ceil = torch.ceil(w)
+        w_ceil = torch.ceil(w + 0.35)
         w_ceil = w_ceil * pause_mask + pause_value
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
@@ -904,7 +905,7 @@ class SynthesizerEval(nn.Module):
 
         logw = self.dp(x, x_mask, g=g)
         w = torch.exp(logw) * x_mask * length_scale
-        w_ceil = torch.ceil(w)
+        w_ceil = torch.ceil(w + 0.35)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
             x_mask.dtype
@@ -920,11 +921,12 @@ class SynthesizerEval(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        z = self.flow(z_p, y_mask, g=g, reverse=True)
-        len_z = z.size()[2]
+
+        len_z = z_p.size()[2]
         print('frame size is: ', len_z)
         if (len_z < 100):
             print('no nead steam')
+            z = self.flow(z_p, y_mask, g=g, reverse=True)
             one_time_wav = self.dec(z, g=g)[0, 0].data.cpu().float().numpy()
             return one_time_wav
 
@@ -951,7 +953,9 @@ class SynthesizerEval(nn.Module):
                 cut_e = stream_index + stream_chunk + hop_frame
                 cut_e_wav = -1 * hop_sample
             
-            z_chunk = z[:, :, cut_s:cut_e]
+            z_chunk = z_p[:, :, cut_s:cut_e]
+            m_chunk = y_mask[:, :, cut_s:cut_e]
+            z_chunk = self.flow(z_chunk, m_chunk, g=g, reverse=True)
             o_chunk = self.dec(z_chunk, g=g)[0, 0].data.cpu().float().numpy()
             o_chunk = o_chunk[cut_s_wav:cut_e_wav]
             stream_out_wav.extend(o_chunk)
@@ -961,7 +965,9 @@ class SynthesizerEval(nn.Module):
         if (stream_index < len_z):
             cut_s = stream_index - hop_frame
             cut_s_wav = hop_sample
-            z_chunk = z[:, :, cut_s:]
+            z_chunk = z_p[:, :, cut_s:]
+            m_chunk = y_mask[:, :, cut_s:]
+            z_chunk = self.flow(z_chunk, m_chunk, g=g, reverse=True)
             o_chunk = self.dec(z_chunk, g=g)[0, 0].data.cpu().float().numpy()
             o_chunk = o_chunk[cut_s_wav:]
             stream_out_wav.extend(o_chunk)
